@@ -10,8 +10,7 @@ int kernel_main ()
 {
     for (int i=0; i<255; i++)
     {
-        asm volatile ("outb %b0,%w1": :"a" (3), "Nd" (0));
-        outb (4, 0);
+        outb (i, 0);
     }
 }
 

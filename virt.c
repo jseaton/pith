@@ -41,7 +41,6 @@ void handleHypercall (struct kvm_run *run)
         printf ("INPUT\n");
     else
     {
-        printf ("O %d\n", *(volatile uint32_t *)((uintptr_t)run + run->io.data_offset));
         printf ("OUTPUT '");
         fwrite (((uint8_t *)run) + run->io.data_offset, 1, run->io.size, stdout);
         printf ("' (%d)\n", *(((uint8_t *)run) + run->io.data_offset));
@@ -183,10 +182,8 @@ int main (int argc, char **argv)
                     printf ("KVM_EXIT_UNKNOWN\n");
                     break;
             	case KVM_EXIT_IO:
-                    printf ("KVM_EXIT_IO d:%d s:%d p:%d c:%d o:%lld\n", run->io.direction, run->io.size, run->io.port, run->io.count, run->io.data_offset);
-                    /* PRINT_STACK(); */
-                    /* PRINT_REGS(); */
-                    /* if (run->io.port == 0) */
+                    /* printf ("KVM_EXIT_IO d:%d s:%d p:%d c:%d o:%lld\n", run->io.direction, run->io.size, run->io.port, run->io.count, run->io.data_offset); */
+                    if (run->io.port == 0)
                         handleHypercall (run);
                     /* if (run->io.direction == KVM_EXIT_IO_IN) */
                     /* { */
