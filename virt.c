@@ -24,9 +24,12 @@
 #define PDE64_PS (1U << 7)
 #define PDE64_G (1U << 8)
 
-#define KERN_MEM_SIZE   0x10000
-#define KERN_MEM_START  0x100000
-#define KERN_PML4_START  (KERN_MEM_START + KERN_MEM_SIZE - 0x1000)
+#define KERN_CODE_SIZE   0x10000
+#define KERN_CODE_START  0x100000
+
+#define KERN_DATA_SIZE   0x10000
+#define KERN_DATA_START  0x200000
+#define KERN_PML4_START  (KERN_DATA_START + KERN_DATA_SIZE - 0x1000)
 #define KERN_PDPT_START  (KERN_PML4_START - 0x1000)
 #define KERN_PD_START    (KERN_PDPT_START - 0x1000)
 #define KERN_STACK_START (KERN_PD_START - 0x2000)
@@ -36,14 +39,17 @@
 
 void handleHypercall (struct kvm_run *run)
 {
-    /* assert (run->exit_reason == KVM_EXIT_IO && run->io.port == 0); */
-    if (run->io.direction == KVM_EXIT_IO_IN) // Input
-        printf ("INPUT\n");
-    else
+    if (run->io.port < 2) // I/O
     {
-        printf ("OUTPUT '");
-        fwrite (((uint8_t *)run) + run->io.data_offset, 1, run->io.size, stdout);
-        printf ("' (%d)\n", *(((uint8_t *)run) + run->io.data_offset));
+        if (run->io.direction == KVM_EXIT_IO_IN) // Input
+            fprintf (stderr, "INPUT\n");
+        else
+        {
+            FILE *output = run->io.port == 0 ? stdout : stderr;
+            fprintf (output, "OUTPUT '");
+            fwrite  (((uint8_t *)run) + run->io.data_offset, 1, run->io.size, output);
+            fprintf (output, "' (%d)\n", *(((uint8_t *)run) + run->io.data_offset));
+        }
     }
 }
 
@@ -55,7 +61,8 @@ int main (int argc, char **argv)
     struct stat st;
     stat(argv[1], &st);
     size_t code_size = st.st_size;
-    uint8_t *code = mmap(NULL, code_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    assert (code_size < KERN_CODE_SIZE);
+    uint8_t *code_mem = mmap(NULL, code_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
 
     int kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
     assert (kvm != -1);
@@ -66,41 +73,46 @@ int main (int argc, char **argv)
     int vmfd = ioctl(kvm, KVM_CREATE_VM, (unsigned long)0);
     assert (vmfd != -1);
 
-    uint8_t *kern_mem = mmap(NULL, KERN_MEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint8_t *kern_mem = mmap(NULL, KERN_DATA_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     assert (kern_mem);
 
     uint8_t *user_mem = mmap(NULL, USER_MEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     assert (user_mem);
 
-    // This copy can probably be avoided by mapping the code directly
-    memcpy(kern_mem, code, code_size);
-    /* memcpy(user_mem+KERN_MEM_START, code, code_size); */
-
 #define PRINT_STACK() \
     for (int i=0; i<100; i++) \
-        printf ("%02x ", *(kern_mem + KERN_STACK_START - KERN_MEM_START + i - 100)); \
+        printf ("%02x ", *(kern_mem + KERN_STACK_START - KERN_DATA_START + i - 100)); \
     printf ("\n");
 
 	int slots = ioctl(kvm, KVM_CHECK_EXTENSION, KVM_CAP_NR_MEMSLOTS);
     assert (slots > 2);
 
-    struct kvm_userspace_memory_region kernel_region = {
+    struct kvm_userspace_memory_region kernel_code_region = {
         .slot = 0,
         .flags = 0,
-        .guest_phys_addr = KERN_MEM_START,
-        .memory_size = KERN_MEM_SIZE,
+        .guest_phys_addr = KERN_CODE_START,
+        .memory_size = KERN_CODE_SIZE,
+        .userspace_addr = (uint64_t)code_mem,
+    };
+
+    struct kvm_userspace_memory_region kernel_data_region = {
+        .slot = 1,
+        .flags = 0,
+        .guest_phys_addr = KERN_DATA_START,
+        .memory_size = KERN_DATA_SIZE,
         .userspace_addr = (uint64_t)kern_mem,
     };
 
     struct kvm_userspace_memory_region user_region = {
-        .slot = 1,
+        .slot = 2,
         .flags = 0,
         .guest_phys_addr = USER_MEM_START,
         .memory_size = USER_MEM_SIZE,
         .userspace_addr = (uint64_t)user_mem,
     };
 
-    assert (!ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &kernel_region));
+    assert (!ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &kernel_code_region));
+    assert (!ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &kernel_data_region));
     assert (!ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &user_region));
 
     int vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, (unsigned long)0);
@@ -116,13 +128,13 @@ int main (int argc, char **argv)
     ioctl(vcpufd, KVM_GET_SREGS, &sregs);
 
     uint64_t pml4_addr = KERN_PML4_START; // Top level page table
-	uint64_t *pml4 = (void *)(kern_mem - KERN_MEM_START + pml4_addr);
+	uint64_t *pml4 = (void *)(kern_mem - KERN_DATA_START + pml4_addr);
 
 	uint64_t pdpt_addr = KERN_PDPT_START; // Level 3
-	uint64_t *pdpt = (void *)(kern_mem - KERN_MEM_START + pdpt_addr);
+	uint64_t *pdpt = (void *)(kern_mem - KERN_DATA_START + pdpt_addr);
 
 	uint64_t pd_addr = KERN_PD_START; // Level 2
-	uint64_t *pd = (void *)(kern_mem - KERN_MEM_START + pd_addr);
+	uint64_t *pd = (void *)(kern_mem - KERN_DATA_START + pd_addr);
 
     pml4[0] = PDE64_PRESENT | PDE64_RW | PDE64_USER | pdpt_addr;
 	pdpt[0] = PDE64_PRESENT | PDE64_RW | PDE64_USER | pd_addr;
@@ -165,7 +177,7 @@ int main (int argc, char **argv)
     ioctl(vcpufd, KVM_SET_SREGS, &sregs);
 
     struct kvm_regs regs = {
-        .rip = KERN_MEM_START,
+        .rip = KERN_CODE_START,
         .rflags = 0x2,
         .rsp = KERN_STACK_START
     };
@@ -183,12 +195,7 @@ int main (int argc, char **argv)
                     break;
             	case KVM_EXIT_IO:
                     /* printf ("KVM_EXIT_IO d:%d s:%d p:%d c:%d o:%lld\n", run->io.direction, run->io.size, run->io.port, run->io.count, run->io.data_offset); */
-                    if (run->io.port == 0)
-                        handleHypercall (run);
-                    /* if (run->io.direction == KVM_EXIT_IO_IN) */
-                    /* { */
-                    /*     *(((uint8_t *)run) + run->io.data_offset) = 7; */
-                    /* } */
+                    handleHypercall (run);
                     break;
             	case KVM_EXIT_DEBUG:
                     printf ("KVM_EXIT_DEBUG\n");
