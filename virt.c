@@ -24,6 +24,7 @@
 #define PDE64_PS (1U << 7)
 #define PDE64_G (1U << 8)
 
+// TODO all of these should be shared with the linker script somehow
 #define KERN_CODE_SIZE   0x10000
 #define KERN_CODE_START  0x100000
 
@@ -32,10 +33,44 @@
 #define KERN_PML4_START  (KERN_DATA_START + KERN_DATA_SIZE - 0x1000)
 #define KERN_PDPT_START  (KERN_PML4_START - 0x1000)
 #define KERN_PD_START    (KERN_PDPT_START - 0x1000)
-#define KERN_STACK_START (KERN_PD_START - 0x2000)
+#define KERN_GDT_SIZE    0x1000
+#define KERN_GDT_START   (KERN_PD_START   - KERN_GDT_SIZE)
+#define KERN_TSS_START   (KERN_PD_START   - 0x1000)
+#define KERN_STACK_START (KERN_GDT_START  - 0x2000)
 
 #define USER_MEM_SIZE  0x10000
 #define USER_MEM_START 0x0
+
+
+struct gdt_desc {
+	uint16_t limit0;
+	uint16_t base0;
+	unsigned base1:8, s:1, type:4, dpl:2, p:1;
+	unsigned limit1:4, avl:1, l:1, db:1, g:1, base2:8;
+	uint32_t base3;
+	uint32_t zero1;
+} __attribute__((packed));
+
+void create_gdt_desc (uint8_t *kern_mem, struct kvm_segment *seg)
+{
+	struct gdt_desc *desc = (struct gdt_desc *)(kern_mem + KERN_DATA_START - KERN_GDT_START + (seg->selector >> 3) * 8);
+
+	desc->limit0 = seg->limit & 0xFFFF;
+	desc->base0  = seg->base & 0xFFFF;
+	desc->base1  = seg->base >> 16;
+	desc->s      = seg->s;
+	desc->type   = seg->type;
+	desc->dpl    = seg->dpl;
+	desc->p      = seg->present;
+	desc->limit1 = seg->limit >> 16;
+	desc->l      = seg->l;
+	desc->db     = seg->db;
+	desc->g      = seg->g;
+	desc->base2  = seg->base >> 24;
+
+	if (!seg->s)
+		desc->base3 = seg->base >> 32;
+}
 
 void handleHypercall (struct kvm_run *run)
 {
@@ -169,10 +204,34 @@ int main (int argc, char **argv)
 
 	sregs.cs = seg;
 
+    create_gdt_desc (kern_mem, &seg);
 
-	/* seg.type = 3; #<{(| Data: read/write, accessed |)}># */
-	/* seg.selector = 2 << 3; */
-	/* sregs.ds = sregs.es = sregs.fs = sregs.gs = sregs.ss = seg; */
+	seg.type = 3; /* Data: read/write, accessed */
+	seg.selector = 2 << 3;
+	sregs.ds = sregs.es = sregs.fs = sregs.gs = sregs.ss = seg;
+
+    create_gdt_desc (kern_mem, &seg);
+
+    struct kvm_segment tss_seg = {
+		.base =  KERN_TSS_START,
+		.limit = 0x67,
+		.selector = 0x18,
+		.present = 1,
+		.type = 11, /* execute, read, accessed */
+		.dpl = 0,
+		.db = 0,
+		.s = 0,
+		.l = 0,
+		.g = 0,
+	};
+
+    sregs.tr = tss_seg;
+
+    create_gdt_desc (kern_mem, &tss_seg);
+    
+
+    sregs.gdt.base  = KERN_GDT_START;
+    sregs.gdt.limit = KERN_GDT_SIZE;
 
     ioctl(vcpufd, KVM_SET_SREGS, &sregs);
 
